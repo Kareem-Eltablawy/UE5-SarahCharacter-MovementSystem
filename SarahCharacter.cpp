@@ -24,6 +24,19 @@ ASarahCharacter::ASarahCharacter()
     TargetMovementAngle = 0.0f;
     bIsTransitioningAngle = false;
 
+    // Initialize jump state
+    bJumpStartCompleted = false;
+    bIsFalling = false;
+    JumpStartTime = 0.0f;
+    JumpAnimationLength = 0.0f;
+    PreviousZVelocity = 0.0f;
+
+    // Initialize landing state
+    LandingStartTime = 0.0f;
+    LandingAnimationLength = 0.0f;
+    bLandingAnimationCompleted = false;
+    bLandingStateActive = false;
+
     // Setup character capsule collision
     GetCapsuleComponent()->InitCapsuleSize(42.f, 96.0f);
 
@@ -62,7 +75,7 @@ ASarahCharacter::ASarahCharacter()
     {
         GetCharacterMovement()->bOrientRotationToMovement = true;
         GetCharacterMovement()->RotationRate = FRotator(0.0f, 540.0f, 0.0f);
-        GetCharacterMovement()->JumpZVelocity = 600.f;
+        GetCharacterMovement()->JumpZVelocity = 300.f;
         GetCharacterMovement()->AirControl = 0.2f;
         GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
     }
@@ -92,6 +105,12 @@ ASarahCharacter::ASarahCharacter()
         SprintAction = SprintAction_Finder.Object;
     }
 
+    static ConstructorHelpers::FObjectFinder<UInputAction> JumpAction_Finder(TEXT("/Game/Sarah/Inputs/IA_Sarah_Jump"));
+    if (JumpAction_Finder.Succeeded())
+    {
+        JumpAction = JumpAction_Finder.Object;
+    }
+
     // Load animation sequences
     static ConstructorHelpers::FObjectFinder<UAnimSequence> IdleAnimFinder(TEXT("/Game/Adventure_Pack/Characters/Sarah/Animation/AS_Sarah_MF_Idle"));
     if (IdleAnimFinder.Succeeded())
@@ -109,6 +128,32 @@ ASarahCharacter::ASarahCharacter()
     if (RunAnimFinder.Succeeded())
     {
         RunAnimation = RunAnimFinder.Object;
+    }
+
+    static ConstructorHelpers::FObjectFinder<UAnimSequence> JumpStartAnimFinder(TEXT("/Game/Adventure_Pack/Characters/Sarah/Animation/AS_Sarah_MM_Jump"));
+    if (JumpStartAnimFinder.Succeeded())
+    {
+        JumpStartAnimation = JumpStartAnimFinder.Object;
+        if (JumpStartAnimation)
+        {
+            JumpAnimationLength = JumpStartAnimation->GetPlayLength();
+        }
+    }
+
+    static ConstructorHelpers::FObjectFinder<UAnimSequence> JumpFallAnimFinder(TEXT("/Game/Adventure_Pack/Characters/Sarah/Animation/AS_Sarah_MM_Fall_Loop"));
+    if (JumpFallAnimFinder.Succeeded())
+    {
+        JumpFallAnimation = JumpFallAnimFinder.Object;
+    }
+
+    static ConstructorHelpers::FObjectFinder<UAnimSequence> LandingAnimFinder(TEXT("/Game/Adventure_Pack/Characters/Sarah/Animation/AS_Sarah_MM_Land"));
+    if (LandingAnimFinder.Succeeded())
+    {
+        LandingAnimation = LandingAnimFinder.Object;
+        if (LandingAnimation)
+        {
+            LandingAnimationLength = LandingAnimation->GetPlayLength();
+        }
     }
 }
 
@@ -175,10 +220,15 @@ void ASarahCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComp
             EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Started, this, &ASarahCharacter::HandleStartSprint);
             EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Completed, this, &ASarahCharacter::HandleStopSprint);
         }
+
+        // Bind jump action
+        if (JumpAction)
+        {
+            EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &ASarahCharacter::HandleJump);
+        }
     }
 }
 
-// Input Handlers
 void ASarahCharacter::HandleMove(const FInputActionValue& Value)
 {
     FVector2D RawInput = Value.Get<FVector2D>();
@@ -225,7 +275,15 @@ void ASarahCharacter::HandleStopSprint()
     bIsSprinting = false;
 }
 
-// State Machine Operations
+void ASarahCharacter::HandleJump()
+{
+    // Only allow jumping from idle state for now
+    if (CurrentState == ESarahMovementState::Idle && IsOnGround())
+    {
+        ChangeState(ESarahMovementState::Jump);
+    }
+}
+
 void ASarahCharacter::ChangeState(ESarahMovementState NewState)
 {
     if (CurrentState == NewState) return;
@@ -236,6 +294,8 @@ void ASarahCharacter::ChangeState(ESarahMovementState NewState)
     case ESarahMovementState::Idle: ExitIdle(); break;
     case ESarahMovementState::Walk: ExitWalk(); break;
     case ESarahMovementState::Run: ExitRun(); break;
+    case ESarahMovementState::Jump: ExitJump(); break;
+    case ESarahMovementState::Landing: ExitLanding(); break;
     }
 
     PreviousState = CurrentState;
@@ -247,6 +307,8 @@ void ASarahCharacter::ChangeState(ESarahMovementState NewState)
     case ESarahMovementState::Idle: EnterIdle(); break;
     case ESarahMovementState::Walk: EnterWalk(); break;
     case ESarahMovementState::Run: EnterRun(); break;
+    case ESarahMovementState::Jump: EnterJump(); break;
+    case ESarahMovementState::Landing: EnterLanding(); break;
     }
 }
 
@@ -255,17 +317,32 @@ void ASarahCharacter::UpdateStateMachine(float DeltaTime)
     // Delegate to current state's update function
     switch (CurrentState)
     {
-    case ESarahMovementState::Idle: UpdateIdle(DeltaTime); break;
-    case ESarahMovementState::Walk: UpdateWalk(DeltaTime); break;
-    case ESarahMovementState::Run: UpdateRun(DeltaTime); break;
+    case ESarahMovementState::Idle:
+        UpdateIdle(DeltaTime);
+        break;
+    case ESarahMovementState::Walk:
+        UpdateWalk(DeltaTime);
+        break;
+    case ESarahMovementState::Run:
+        UpdateRun(DeltaTime);
+        break;
+    case ESarahMovementState::Jump:
+        UpdateJump(DeltaTime);
+        break;
+    case ESarahMovementState::Landing:
+        UpdateLanding(DeltaTime);
+        break;
     }
 }
 
-// State Implementation - Idle
 void ASarahCharacter::EnterIdle()
 {
     SetMovementSpeed(0.0f);
-    PlayAnimationInternal(IdleAnimation);
+
+    if (IdleAnimation)
+    {
+        PlayAnimationInternal(IdleAnimation);
+    }
 }
 
 void ASarahCharacter::UpdateIdle(float DeltaTime)
@@ -288,7 +365,6 @@ void ASarahCharacter::ExitIdle()
     // Cleanup if needed
 }
 
-// State Implementation - Walk
 void ASarahCharacter::EnterWalk()
 {
     SetMovementSpeed(WalkSpeed);
@@ -312,7 +388,6 @@ void ASarahCharacter::ExitWalk()
     // Cleanup if needed
 }
 
-// State Implementation - Run
 void ASarahCharacter::EnterRun()
 {
     SetMovementSpeed(RunSpeed);
@@ -336,9 +411,152 @@ void ASarahCharacter::ExitRun()
     // Cleanup if needed
 }
 
-// Movement System
+void ASarahCharacter::EnterJump()
+{
+    // Reset jump state variables
+    bJumpStartCompleted = false;
+    bIsFalling = false;
+    JumpStartTime = GetWorld()->GetTimeSeconds();
+    PreviousZVelocity = 0.0f;
+
+    // Play jump start animation
+    if (JumpStartAnimation)
+    {
+        PlayAnimationInternal(JumpStartAnimation);
+    }
+
+    // Trigger the actual jump physics
+    if (GetCharacterMovement())
+    {
+        GetCharacterMovement()->SetMovementMode(MOVE_Falling);
+        GetCharacterMovement()->Velocity.Z = FMath::Max(GetCharacterMovement()->Velocity.Z, GetCharacterMovement()->JumpZVelocity);
+        PreviousZVelocity = GetCharacterMovement()->Velocity.Z;
+    }
+}
+
+void ASarahCharacter::UpdateJump(float DeltaTime)
+{
+    if (!GetCharacterMovement()) return;
+
+    float CurrentZVelocity = GetCharacterMovement()->Velocity.Z;
+
+    // Check if we've reached the highest point (when Z velocity changes from positive to negative)
+    if (!bJumpStartCompleted && PreviousZVelocity > 0 && CurrentZVelocity <= 0)
+    {
+        bJumpStartCompleted = true;
+        // Switch to fall animation at the apex
+        if (JumpFallAnimation)
+        {
+            PlayAnimationInternal(JumpFallAnimation);
+        }
+    }
+
+    // Update previous velocity for next frame comparison
+    PreviousZVelocity = CurrentZVelocity;
+
+    // Fallback: if we don't detect the apex via velocity, use time-based transition after 1 second
+    if (!bJumpStartCompleted && (GetWorld()->GetTimeSeconds() - JumpStartTime) > 1.0f)
+    {
+        bJumpStartCompleted = true;
+        if (JumpFallAnimation)
+        {
+            PlayAnimationInternal(JumpFallAnimation);
+        }
+    }
+
+    // Check if we're falling (for state tracking)
+    if (GetCharacterMovement()->IsFalling())
+    {
+        bIsFalling = true;
+    }
+
+    // When we detect ground contact, transition to LANDING state
+    if (bIsFalling && IsOnGround())
+    {
+        ChangeState(ESarahMovementState::Landing);
+    }
+}
+
+void ASarahCharacter::ExitJump()
+{
+    // Reset any jump-specific state
+    bJumpStartCompleted = false;
+    bIsFalling = false;
+    PreviousZVelocity = 0.0f;
+}
+
+void ASarahCharacter::EnterLanding()
+{
+    // Reset landing state
+    bLandingAnimationCompleted = false;
+    bLandingStateActive = true;
+    LandingStartTime = GetWorld()->GetTimeSeconds();
+
+    // IMPORTANT: Stop ALL movement during landing to prevent state conflicts
+    SetMovementSpeed(0.0f);
+
+    // Stop any current animation immediately
+    if (GetMesh())
+    {
+        GetMesh()->Stop();
+    }
+
+    // Play the landing animation
+    if (LandingAnimation)
+    {
+        PlayAnimationInternal(LandingAnimation);
+    }
+    else
+    {
+        // If no landing animation, go directly to idle
+        ChangeState(ESarahMovementState::Idle);
+    }
+}
+
+void ASarahCharacter::UpdateLanding(float DeltaTime)
+{
+    // Check if landing animation has completed
+    if (LandingAnimation && !bLandingAnimationCompleted && bLandingStateActive)
+    {
+        float CurrentTime = GetWorld()->GetTimeSeconds();
+        float TimeSinceLandingStart = CurrentTime - LandingStartTime;
+
+        // Use a slightly shorter time to ensure we transition BEFORE the animation ends
+        float TransitionTime = LandingAnimationLength - 0.05f; // 50ms buffer
+
+        if (TimeSinceLandingStart >= TransitionTime)
+        {
+            // Mark animation as completed
+            bLandingAnimationCompleted = true;
+            bLandingStateActive = false;
+
+            // Stop the landing animation and immediately go to idle
+            if (GetMesh())
+            {
+                GetMesh()->Stop();
+            }
+
+            // Transition to idle immediately
+            ChangeState(ESarahMovementState::Idle);
+        }
+    }
+}
+
+void ASarahCharacter::ExitLanding()
+{
+    // Reset landing state variables
+    bLandingAnimationCompleted = false;
+    bLandingStateActive = false;
+}
+
 void ASarahCharacter::UpdateMovement(float DeltaTime)
 {
+    // Don't process normal movement during jump or landing states
+    if (CurrentState == ESarahMovementState::Jump || CurrentState == ESarahMovementState::Landing)
+    {
+        return;
+    }
+
     if (HasMovementInput())
     {
         // Start camera-relative movement system when first moving from idle
@@ -441,7 +659,6 @@ void ASarahCharacter::StopCameraRelativeMovement()
     }
 }
 
-// Continuous Angle Movement System
 float ASarahCharacter::CalculateContinuousInputAngle() const
 {
     if (!HasMovementInput()) return CurrentMovementAngle;
@@ -563,7 +780,6 @@ bool ASarahCharacter::HasMovementInput() const
     return (FMath::Abs(MoveInput.X) > 0.01f || FMath::Abs(MoveInput.Y) > 0.01f);
 }
 
-// Animation System
 bool ASarahCharacter::PlayAnimationInternal(UAnimSequence* Animation)
 {
     if (!Animation || !GetMesh()) return false;
@@ -597,7 +813,12 @@ void ASarahCharacter::SetMovementSpeed(float Speed)
     }
 }
 
-// Public Interface
+bool ASarahCharacter::IsOnGround() const
+{
+    if (!GetCharacterMovement()) return false;
+    return GetCharacterMovement()->IsMovingOnGround();
+}
+
 bool ASarahCharacter::PlayAnimationDirect(UAnimSequence* Animation)
 {
     return PlayAnimationInternal(Animation);
