@@ -15,7 +15,9 @@ enum class ESarahMovementState : uint8
 {
     Idle,
     Walk,
-    Run
+    Run,
+    Jump,
+    Landing
 };
 
 UCLASS()
@@ -50,6 +52,12 @@ public:
     UFUNCTION(BlueprintPure, Category = "SarahFSM")
     bool SarahIsRunning() const { return CurrentState == ESarahMovementState::Run; }
 
+    UFUNCTION(BlueprintPure, Category = "SarahFSM")
+    bool SarahIsJumping() const { return CurrentState == ESarahMovementState::Jump; }
+
+    UFUNCTION(BlueprintPure, Category = "SarahFSM")
+    bool SarahIsLanding() const { return CurrentState == ESarahMovementState::Landing; }
+
     UFUNCTION(BlueprintCallable, Category = "Sarah|Movement")
     FString GetMovementDirectionName() const;
 
@@ -74,6 +82,15 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sarah|Animation")
     UAnimSequence* RunAnimation;
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sarah|Animation")
+    UAnimSequence* JumpStartAnimation;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sarah|Animation")
+    UAnimSequence* JumpFallAnimation;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sarah|Animation")
+    UAnimSequence* LandingAnimation;
+
 protected:
     virtual void BeginPlay() override;
     virtual void Tick(float DeltaTime) override;
@@ -91,6 +108,9 @@ protected:
 
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
     UInputAction* SprintAction;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
+    UInputAction* JumpAction;
 
     // Movement configuration
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement")
@@ -132,12 +152,26 @@ private:
     float TargetMovementAngle;
     bool bIsTransitioningAngle;
 
+    // Jump state variables
+    bool bJumpStartCompleted;
+    bool bIsFalling;
+    float JumpStartTime;
+    float JumpAnimationLength;
+    float PreviousZVelocity;
+
+    // Landing state variables
+    float LandingStartTime;
+    float LandingAnimationLength;
+    bool bLandingAnimationCompleted;
+    bool bLandingStateActive;
+
     // Input handlers
     void HandleMove(const FInputActionValue& Value);
     void HandleMoveStop(const FInputActionValue& Value);
     void HandleLook(const FInputActionValue& Value);
     void HandleStartSprint();
     void HandleStopSprint();
+    void HandleJump();
 
     // State machine operations
     void ChangeState(ESarahMovementState NewState);
@@ -153,6 +187,12 @@ private:
     void EnterRun();
     void UpdateRun(float DeltaTime);
     void ExitRun();
+    void EnterJump();
+    void UpdateJump(float DeltaTime);
+    void ExitJump();
+    void EnterLanding();
+    void UpdateLanding(float DeltaTime);
+    void ExitLanding();
 
     // Movement functions
     void UpdateMovement(float DeltaTime);
@@ -175,4 +215,7 @@ private:
 
     // Camera functions
     void UpdateCameraRotationReference();
+
+    // Ground detection
+    bool IsOnGround() const;
 };
